@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/fidalcastro/chirpy/internal/auth"
 	database "github.com/fidalcastro/chirpy/internal/database"
 	"github.com/google/uuid"
 
@@ -108,7 +109,8 @@ func main() {
 
 	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
 		type reqBody struct {
-			Email string `json:"email"`
+			Email    string `json:"email"`
+			Password string `json:"password"`
 		}
 
 		decoder := json.NewDecoder(r.Body)
@@ -119,7 +121,16 @@ func main() {
 			return
 		}
 
-		user, err := dbQueries.CreateUser(r.Context(), params.Email)
+		hashedPassword, err := auth.HashPassword(params.Password)
+		if err != nil {
+			httpErrorResponse("Unable to hash password using argon2id", err, 500, w)
+			return
+		}
+
+		user, err := dbQueries.CreateUser(r.Context(), database.CreateUserParams{
+			Email:          params.Email,
+			HashedPassword: hashedPassword,
+		})
 		if err != nil {
 			httpErrorResponse("Unable to create user record for email: "+params.Email, err, 500, w)
 			return
@@ -145,6 +156,58 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
+		w.Write(respData)
+	})
+
+	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
+		type reqBody struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+
+		decoder := json.NewDecoder(r.Body)
+		params := reqBody{}
+
+		if err := decoder.Decode(&params); err != nil {
+			httpErrorResponse("Unable to parse email id from request body", err, 500, w)
+			return
+		}
+
+		user, err := dbQueries.GetUserByEmail(r.Context(), params.Email)
+		if err != nil {
+			httpErrorResponse("Unable to get user by email: "+params.Email, err, 500, w)
+			return
+		}
+		pMatch, err := auth.CheckPasswordHash(params.Password, user.HashedPassword)
+		if err != nil {
+			httpErrorResponse("Invalid password for email: "+params.Email, err, 401, w)
+			return
+		}
+		if !pMatch {
+			httpErrorResponse("Invalid password for email: "+params.Email, nil, 401, w)
+			return
+		}
+
+		type hUser struct {
+			Id        string `json:"id"`
+			CreatedAt string `json:"created_at"`
+			UpdatedAt string `json:"updated_at"`
+			Email     string `json:"email"`
+		}
+
+		resp := hUser{
+			Id:        user.ID.String(),
+			CreatedAt: user.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			UpdatedAt: user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+			Email:     user.Email,
+		}
+		respData, err := json.Marshal(resp)
+		if err != nil {
+			httpErrorResponse("Unable to marshal user response", err, 500, w)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 		w.Write(respData)
 	})
 
