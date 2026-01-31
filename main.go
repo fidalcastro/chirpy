@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/fidalcastro/chirpy/internal/auth"
 	database "github.com/fidalcastro/chirpy/internal/database"
@@ -21,6 +22,8 @@ import (
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dbUrl          string
+	tokenSecret    string
 }
 
 type errorResponse struct {
@@ -65,8 +68,6 @@ func main() {
 		</body>
 	</html>
 	`
-	// error respsonse
-	fmt.Println(cfg.fileserverHits.Load())
 	mux := http.NewServeMux()
 
 	dbURL := os.Getenv("DB_URL")
@@ -74,7 +75,13 @@ func main() {
 	if platform == "" {
 		platform = "dev"
 	}
-	fmt.Println(dbURL)
+	cfg.dbUrl = dbURL
+	cfg.tokenSecret = os.Getenv("JWT_SECRET")
+	if cfg.tokenSecret == "" {
+		log.Fatal("JWT_SECRET environment variable is not set")
+	}
+	fmt.Println("Api Config: ", cfg)
+
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
@@ -161,8 +168,9 @@ func main() {
 
 	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
 		type reqBody struct {
-			Email    string `json:"email"`
-			Password string `json:"password"`
+			Email            string `json:"email"`
+			Password         string `json:"password"`
+			ExpiresInSeconds int64  `json:"expires_in_secondss"`
 		}
 
 		decoder := json.NewDecoder(r.Body)
@@ -171,6 +179,10 @@ func main() {
 		if err := decoder.Decode(&params); err != nil {
 			httpErrorResponse("Unable to parse email id from request body", err, 500, w)
 			return
+		}
+
+		if params.ExpiresInSeconds <= 0 || params.ExpiresInSeconds > 36_00 {
+			params.ExpiresInSeconds = 3600
 		}
 
 		user, err := dbQueries.GetUserByEmail(r.Context(), params.Email)
@@ -188,11 +200,17 @@ func main() {
 			return
 		}
 
+		token, err := auth.MakeJWT(user.ID, cfg.tokenSecret, (time.Duration(params.ExpiresInSeconds) * time.Second))
+		if err != nil {
+			httpErrorResponse("Unable to create JWT token for user id: "+user.ID.String(), err, 500, w)
+			return
+		}
 		type hUser struct {
 			Id        string `json:"id"`
 			CreatedAt string `json:"created_at"`
 			UpdatedAt string `json:"updated_at"`
 			Email     string `json:"email"`
+			Token     string `json:"token"`
 		}
 
 		resp := hUser{
@@ -200,6 +218,7 @@ func main() {
 			CreatedAt: user.CreatedAt.Format("2006-01-02T15:04:05Z"),
 			UpdatedAt: user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 			Email:     user.Email,
+			Token:     token,
 		}
 		respData, err := json.Marshal(resp)
 		if err != nil {
@@ -213,9 +232,20 @@ func main() {
 
 	mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request) {
 		type reqBody struct {
-			UserID string `json:"user_id"`
-			Body   string `json:"body"`
+			Body string `json:"body"`
 		}
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			httpErrorResponse("Unable to get bearer token", err, 401, w)
+			return
+		}
+
+		userId, err := auth.ValidateJWT(token, cfg.tokenSecret)
+		if err != nil {
+			httpErrorResponse("Unable to validate JWT token", err, 401, w)
+			return
+		}
+
 		decoder := json.NewDecoder(r.Body)
 		params := reqBody{}
 
@@ -226,12 +256,6 @@ func main() {
 
 		if len(params.Body) == 0 {
 			httpErrorResponse("Chirp is too small or can not be empty", nil, 500, w)
-			return
-		}
-
-		usedId, err := uuid.Parse(params.UserID)
-		if err != nil {
-			httpErrorResponse("Unable to parse user id", err, 400, w)
 			return
 		}
 
@@ -253,7 +277,7 @@ func main() {
 
 		chirp, err := dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
 			Body:   strings.Join(body, " "),
-			UserID: usedId,
+			UserID: userId,
 		})
 		if err != nil {
 			httpErrorResponse("Unable to create chirp", err, 500, w)
