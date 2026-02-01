@@ -11,5 +11,9 @@ WHERE id = $1 LIMIT 1;
 SELECT * FROM chirps
 ORDER BY created_at;
 
+-- name: DeleteChirpById :exec
+DELETE FROM chirps
+WHERE id = $1;
+
 -- name: DropChirps :exec
 TRUNCATE TABLE chirps CASCADE;

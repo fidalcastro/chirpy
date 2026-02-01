@@ -24,6 +24,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbUrl          string
 	tokenSecret    string
+	polkaKey       string
 }
 
 type errorResponse struct {
@@ -79,6 +80,10 @@ func main() {
 	cfg.tokenSecret = os.Getenv("JWT_SECRET")
 	if cfg.tokenSecret == "" {
 		log.Fatal("JWT_SECRET environment variable is not set")
+	}
+	cfg.polkaKey = os.Getenv("POLKA_KEY")
+	if cfg.polkaKey == "" {
+		log.Fatalf("POLKA_KEY environment variable is not set")
 	}
 	fmt.Println("Api Config: ", cfg)
 
@@ -144,17 +149,19 @@ func main() {
 		}
 
 		type hUser struct {
-			Id        string `json:"id"`
-			CreatedAt string `json:"created_at"`
-			UpdatedAt string `json:"updated_at"`
-			Email     string `json:"email"`
+			Id          string `json:"id"`
+			CreatedAt   string `json:"created_at"`
+			UpdatedAt   string `json:"updated_at"`
+			Email       string `json:"email"`
+			IsChirpyRed bool   `json:"is_chirpy_red"`
 		}
 
 		resp := hUser{
-			Id:        user.ID.String(),
-			CreatedAt: user.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			UpdatedAt: user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-			Email:     user.Email,
+			Id:          user.ID.String(),
+			CreatedAt:   user.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:   user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+			Email:       user.Email,
+			IsChirpyRed: user.IsChirpyRed,
 		}
 		respData, err := json.Marshal(resp)
 		if err != nil {
@@ -209,17 +216,19 @@ func main() {
 		}
 
 		type hUser struct {
-			Id        string `json:"id"`
-			CreatedAt string `json:"created_at"`
-			UpdatedAt string `json:"updated_at"`
-			Email     string `json:"email"`
+			Id          string `json:"id"`
+			CreatedAt   string `json:"created_at"`
+			UpdatedAt   string `json:"updated_at"`
+			Email       string `json:"email"`
+			IsChirpyRed bool   `json:"is_chirpy_red"`
 		}
 
 		resp := hUser{
-			Id:        user.ID.String(),
-			CreatedAt: user.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			UpdatedAt: user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-			Email:     user.Email,
+			Id:          user.ID.String(),
+			CreatedAt:   user.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:   user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+			Email:       user.Email,
+			IsChirpyRed: user.IsChirpyRed,
 		}
 		respData, err := json.Marshal(resp)
 		if err != nil {
@@ -285,6 +294,7 @@ func main() {
 			Email        string `json:"email"`
 			Token        string `json:"token"`
 			RefreshToken string `json:"refresh_token"`
+			IsChirpyRed  bool   `json:"is_chirpy_red"`
 		}
 
 		resp := hUser{
@@ -294,6 +304,7 @@ func main() {
 			Email:        user.Email,
 			Token:        token,
 			RefreshToken: rToken.Token,
+			IsChirpyRed:  user.IsChirpyRed,
 		}
 		respData, err := json.Marshal(resp)
 		if err != nil {
@@ -498,6 +509,114 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write(respData)
+	})
+
+	mux.HandleFunc("DELETE /api/chirps/{id}", func(w http.ResponseWriter, r *http.Request) {
+		accessToken, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			httpErrorResponse("No 'Authorization' header found", err, http.StatusUnauthorized, w)
+			return
+		}
+
+		uId, err := auth.ValidateJWT(accessToken, cfg.tokenSecret)
+		if err != nil {
+			httpErrorResponse("", err, http.StatusUnauthorized, w)
+			return
+		}
+
+		chirpId := r.PathValue("id")
+		if len(chirpId) == 0 {
+			httpErrorResponse("Chirp id can not be empty", nil, 500, w)
+			return
+		}
+
+		cId, err := uuid.Parse(chirpId)
+		if err != nil {
+			httpErrorResponse("Unable to parse chirp id", err, 400, w)
+			return
+		}
+
+		chirp, err := dbQueries.GetChirp(r.Context(), cId)
+		if err != nil {
+			httpErrorResponse("Unable to get chirp by id: "+chirpId, err, 404, w)
+			return
+		}
+
+		if chirp.UserID != uId {
+			httpErrorResponse("", fmt.Errorf("You can't delete chirp not owned by you"), http.StatusForbidden, w)
+			return
+		}
+
+		if err = dbQueries.DeleteChirpById(r.Context(), cId); err != nil {
+			httpErrorResponse("Unable to delete chirp by id: "+chirpId, err, http.StatusInternalServerError, w)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /api/polka/webhooks", func(w http.ResponseWriter, r *http.Request) {
+		/*
+			Update the POST /api/polka/webhooks endpoint. It should ensure that the API key in the header matches the one stored in the .env file.
+			If it doesn't, the endpoint should respond with a 401 status code.
+		*/
+		apiKey, err := auth.GetAPIKey(r.Header)
+		if err != nil {
+			//httpErrorResponse("", err, http.StatusInternalServerError, w)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if apiKey != cfg.polkaKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		/*
+			{
+				"event": "user.upgraded",
+				"data": {
+					"user_id": "3311741c-680c-4546-99f3-fc9efac2036c"
+				}
+			}
+		*/
+		type userData struct {
+			UserID string `json:"user_id"`
+		}
+		type reqBody struct {
+			Event string   `json:"event"`
+			Data  userData `json:"data"`
+		}
+
+		decoder := json.NewDecoder(r.Body)
+		params := reqBody{}
+
+		if err := decoder.Decode(&params); err != nil {
+			httpErrorResponse("Unable to parse email id from request body", err, 500, w)
+			return
+		}
+
+		if params.Event != "user.upgraded" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		uId, err := uuid.Parse(params.Data.UserID)
+		if err != nil {
+			//httpErrorResponse("Unable to parse user id", err, 400, w)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		_, err = dbQueries.GetUserById(r.Context(), uId)
+		if err != nil {
+			httpErrorResponse(fmt.Sprintf("Unable to add membershipt to user id: %s", uId.String()), err, http.StatusNotFound, w)
+			return
+		}
+
+		err = dbQueries.UpgradeUserMembership(r.Context(), uId)
+		if err != nil {
+			httpErrorResponse("Unable to upgrade user membership", err, http.StatusInternalServerError, w)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir("./")))))

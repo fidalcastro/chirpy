@@ -7,6 +7,10 @@ RETURNING *;
 SELECT * FROM users
 WHERE email = $1 LIMIT 1;
 
+-- name: GetUserById :one
+SELECT * FROM users
+WHERE id = $1;
+
 -- name: UpdateUser :one
 UPDATE users
 SET hashed_password = $2,
@@ -14,6 +18,11 @@ SET hashed_password = $2,
     updated_at = NOW()
 WHERE id = $1
 RETURNING *;
+
+-- name: UpgradeUserMembership :exec
+UPDATE users
+SET is_chirpy_red = TRUE
+WHERE id = $1;
 
 -- name: DropUser :exec
 TRUNCATE TABLE users CASCADE;

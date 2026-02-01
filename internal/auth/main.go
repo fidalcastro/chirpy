@@ -22,6 +22,24 @@ func MakeRefreshToken() (string, error) {
 	return hex.EncodeToString(refreshToken), nil
 }
 
+func GetAPIKey(headers http.Header) (string, error) {
+	authHeader := headers.Get("Authorization")
+	if authHeader == "" {
+		return "", fmt.Errorf("http 'Authorization' header is not set")
+	}
+
+	if !strings.HasPrefix(authHeader, "ApiKey ") {
+		return "", fmt.Errorf("http 'Authorization' header doesn't contain 'ApiKey' or malformed.")
+	}
+
+	apiKey := strings.Split(authHeader, " ")[1]
+	if apiKey == "" {
+		return "", fmt.Errorf("http 'Authorization' header doesn't contain 'ApiKey' or malformed.")
+	}
+
+	return apiKey, nil
+}
+
 func GetBearerToken(headers http.Header) (string, error) {
 	authHeader := headers.Get("Authorization")
 	if authHeader == "" {
