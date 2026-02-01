@@ -166,11 +166,22 @@ func main() {
 		w.Write(respData)
 	})
 
-	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("PUT /api/users", func(w http.ResponseWriter, r *http.Request) {
 		type reqBody struct {
-			Email            string `json:"email"`
-			Password         string `json:"password"`
-			ExpiresInSeconds int64  `json:"expires_in_secondss"`
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+
+		accessToken, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			httpErrorResponse("", err, http.StatusUnauthorized, w)
+			return
+		}
+
+		userId, err := auth.ValidateJWT(accessToken, cfg.tokenSecret)
+		if err != nil {
+			httpErrorResponse("", err, http.StatusUnauthorized, w)
+			return
 		}
 
 		decoder := json.NewDecoder(r.Body)
@@ -181,8 +192,57 @@ func main() {
 			return
 		}
 
-		if params.ExpiresInSeconds <= 0 || params.ExpiresInSeconds > 36_00 {
-			params.ExpiresInSeconds = 3600
+		hashedPassword, err := auth.HashPassword(params.Password)
+		if err != nil {
+			httpErrorResponse("", err, http.StatusInternalServerError, w)
+			return
+		}
+
+		user, err := dbQueries.UpdateUser(r.Context(), database.UpdateUserParams{
+			ID:             userId,
+			HashedPassword: hashedPassword,
+			Email:          params.Email,
+		})
+		if err != nil {
+			httpErrorResponse("Failed to update user email/password. Error: ", err, http.StatusInternalServerError, w)
+			return
+		}
+
+		type hUser struct {
+			Id        string `json:"id"`
+			CreatedAt string `json:"created_at"`
+			UpdatedAt string `json:"updated_at"`
+			Email     string `json:"email"`
+		}
+
+		resp := hUser{
+			Id:        user.ID.String(),
+			CreatedAt: user.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			UpdatedAt: user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+			Email:     user.Email,
+		}
+		respData, err := json.Marshal(resp)
+		if err != nil {
+			httpErrorResponse("Unable to marshal user response", err, 500, w)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(respData)
+	})
+
+	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
+		type reqBody struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+
+		decoder := json.NewDecoder(r.Body)
+		params := reqBody{}
+
+		if err := decoder.Decode(&params); err != nil {
+			httpErrorResponse("Unable to parse email id from request body", err, 500, w)
+			return
 		}
 
 		user, err := dbQueries.GetUserByEmail(r.Context(), params.Email)
@@ -200,25 +260,40 @@ func main() {
 			return
 		}
 
-		token, err := auth.MakeJWT(user.ID, cfg.tokenSecret, (time.Duration(params.ExpiresInSeconds) * time.Second))
+		token, err := auth.MakeJWT(user.ID, cfg.tokenSecret)
 		if err != nil {
 			httpErrorResponse("Unable to create JWT token for user id: "+user.ID.String(), err, 500, w)
 			return
 		}
+
+		newRefToken, _ := auth.MakeRefreshToken()
+
+		rToken, err := dbQueries.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+			Token:     newRefToken,
+			UserID:    user.ID,
+			ExpiresAt: time.Now().AddDate(0, 0, 60),
+		})
+		if err != nil {
+			httpErrorResponse("Unable to create refresh token for user id: "+user.ID.String(), err, 500, w)
+			return
+		}
+
 		type hUser struct {
-			Id        string `json:"id"`
-			CreatedAt string `json:"created_at"`
-			UpdatedAt string `json:"updated_at"`
-			Email     string `json:"email"`
-			Token     string `json:"token"`
+			Id           string `json:"id"`
+			CreatedAt    string `json:"created_at"`
+			UpdatedAt    string `json:"updated_at"`
+			Email        string `json:"email"`
+			Token        string `json:"token"`
+			RefreshToken string `json:"refresh_token"`
 		}
 
 		resp := hUser{
-			Id:        user.ID.String(),
-			CreatedAt: user.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			UpdatedAt: user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-			Email:     user.Email,
-			Token:     token,
+			Id:           user.ID.String(),
+			CreatedAt:    user.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:    user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+			Email:        user.Email,
+			Token:        token,
+			RefreshToken: rToken.Token,
 		}
 		respData, err := json.Marshal(resp)
 		if err != nil {
@@ -228,6 +303,63 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write(respData)
+	})
+
+	mux.HandleFunc("POST /api/refresh", func(w http.ResponseWriter, r *http.Request) {
+		rToken, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			httpErrorResponse("Unable to get refresh token", err, 401, w)
+			return
+		}
+		refreshToken, err := dbQueries.GetRefreshToken(r.Context(), rToken)
+		if err != nil {
+			httpErrorResponse("Unable to get refresh token from database", err, 401, w)
+			return
+		}
+
+		if refreshToken.RevokedAt.Valid && refreshToken.RevokedAt.Time.Before(time.Now()) {
+			httpErrorResponse("Refresh token has been revoked", nil, 401, w)
+			return
+		}
+		if refreshToken.ExpiresAt.Before(time.Now()) {
+			httpErrorResponse("Refresh token has expired", nil, 401, w)
+			return
+		}
+
+		accessToken, err := auth.MakeJWT(refreshToken.UserID, cfg.tokenSecret)
+		if err != nil {
+			httpErrorResponse("Unable to create new access token", err, 500, w)
+			return
+		}
+
+		type hRefreshResponse struct {
+			AccessToken string `json:"token"`
+		}
+		resp := hRefreshResponse{
+			AccessToken: accessToken,
+		}
+		respData, err := json.Marshal(resp)
+		if err != nil {
+			httpErrorResponse("Unable to marshal refresh token response", err, 500, w)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(respData)
+	})
+
+	mux.HandleFunc("POST /api/revoke", func(w http.ResponseWriter, r *http.Request) {
+		rToken, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			httpErrorResponse("Unable to get refresh token", err, 401, w)
+			return
+		}
+		_, err = dbQueries.RevokeRefreshToken(r.Context(), rToken)
+		if err != nil {
+			httpErrorResponse("Unable to revoke refresh token", err, 500, w)
+			return
+		}
+		w.WriteHeader(204)
 	})
 
 	mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request) {

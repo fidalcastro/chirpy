@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -10,6 +12,15 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 )
+
+func MakeRefreshToken() (string, error) {
+	var refreshToken []byte = make([]byte, 32)
+	_, err := rand.Read(refreshToken)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate refresh token: %v", err)
+	}
+	return hex.EncodeToString(refreshToken), nil
+}
 
 func GetBearerToken(headers http.Header) (string, error) {
 	authHeader := headers.Get("Authorization")
@@ -29,11 +40,11 @@ func GetBearerToken(headers http.Header) (string, error) {
 	return tokenString, nil
 }
 
-func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (string, error) {
+func MakeJWT(userID uuid.UUID, tokenSecret string) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
 		Issuer:    "chirpy",
 		IssuedAt:  jwt.NewNumericDate(time.Now()),
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiresIn)),
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour * 1)),
 		Subject:   userID.String(),
 	})
 	return token.SignedString([]byte(tokenSecret))
