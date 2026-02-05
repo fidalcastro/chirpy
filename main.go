@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -447,11 +448,30 @@ func main() {
 
 	mux.HandleFunc("GET /api/chirps", func(w http.ResponseWriter, r *http.Request) {
 		var result []hChirp
+		var err error
+		var chirpsList []database.Chirp
 
-		chirpsList, err := dbQueries.ListChirps(r.Context())
+		authorId := r.URL.Query().Get("author_id")
+		if authorId != "" {
+			userId, err := uuid.Parse(authorId)
+			if err != nil {
+				httpErrorResponse("Author id is not UUID", err, 500, w)
+				return
+			}
+			chirpsList, err = dbQueries.GetChirpByAuthor(r.Context(), userId)
+		} else {
+			chirpsList, err = dbQueries.ListChirps(r.Context())
+		}
 		if err != nil {
 			httpErrorResponse("Unable to list all chirps", err, 500, w)
 			return
+		}
+
+		sortBy := r.URL.Query().Get("sort")
+		if sortBy == "desc" {
+			sort.Slice(chirpsList, func(i, j int) bool {
+				return chirpsList[i].CreatedAt.After(chirpsList[j].CreatedAt)
+			})
 		}
 
 		for _, chirp := range chirpsList {

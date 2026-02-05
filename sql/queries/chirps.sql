@@ -7,6 +7,10 @@ RETURNING *;
 SELECT * FROM chirps
 WHERE id = $1 LIMIT 1;
 
+-- name: GetChirpByAuthor :many
+SELECT * from chirps
+WHERE user_id = $1;
+
 -- name: ListChirps :many
 SELECT * FROM chirps
 ORDER BY created_at;
